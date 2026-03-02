@@ -407,6 +407,60 @@ function generateSektorBreakdown(dataRows, unit = 'WO') {
   return result;
 }
 
+// === Helper: Sektor grouped detail (STO counts + detail entries inside each sektor) ===
+// detailMode: 'workzone' (group by workzone col 7) or 'teknisi' (group by teknisi col 17)
+function generateSektorGroupedDetail(dataRows, unit = 'WO', detailMode = 'workzone') {
+  let result = '';
+  const detailCol = detailMode === 'workzone' ? 7 : 17;
+
+  for (const [sektorName, stoList] of Object.entries(SEKTOR_MAP)) {
+    let sektorTotal = 0;
+    const stoCountMap = {};
+    stoList.forEach(sto => { stoCountMap[sto] = 0; });
+    const sektorRows = [];
+
+    dataRows.forEach(row => {
+      const wz = (row[7] || '').toUpperCase().trim();
+      for (const sto of stoList) {
+        if (wz.startsWith(sto) || wz.includes(sto)) {
+          stoCountMap[sto]++;
+          sektorTotal++;
+          sektorRows.push(row);
+          break;
+        }
+      }
+    });
+
+    result += `\n📍 <b>SEKTOR ${sektorName}</b> (${sektorTotal} ${unit})\n`;
+    stoList.forEach(sto => {
+      result += `• ${sto}: ${stoCountMap[sto]}\n`;
+    });
+
+    if (sektorRows.length === 0) continue;
+
+    // Group detail entries
+    const detailMap = {};
+    sektorRows.forEach(row => {
+      const key = (row[detailCol] || '-').trim();
+      const symptom = (row[10] || '-').trim();
+      if (!detailMap[key]) detailMap[key] = { total: 0 };
+      detailMap[key].total++;
+      detailMap[key][symptom] = (detailMap[key][symptom] || 0) + 1;
+    });
+
+    result += '\n';
+    Object.entries(detailMap).sort((a, b) => b[1].total - a[1].total).forEach(([key, counts]) => {
+      result += `🔸 <b>${key}</b>\n`;
+      result += `   <b>Total:</b> ${counts.total} ${unit}\n`;
+      Object.entries(counts).filter(([k]) => k !== 'total').sort((a, b) => b[1] - a[1]).forEach(([s, c]) => {
+        result += `   • ${s}: ${c}\n`;
+      });
+      result += '\n';
+    });
+  }
+  return result;
+}
+
 // === HELPER: Parse tanggal Indonesia ke Date ===
 function parseIndonesianDate(dateStr) {
   const months = {
@@ -872,19 +926,10 @@ bot.on('message', async (msg) => {
         const dateLabel = customDate || 'Hari ini';
         let msg = `📊 <b>LAPORAN TEKNISI - ${dateLabel}</b>\n\n`;
 
-        if (entries.length === 0) {
+        if (filteredData.length === 0) {
           msg += '<i>Belum ada data untuk periode ini</i>';
         } else {
-          msg += generateSektorBreakdown(filteredData, 'WO');
-
-          entries.forEach(([teknisi, counts]) => {
-            msg += `🔸 <b>${teknisi}</b>\n`;
-            msg += `   <b>Total:</b> ${counts.total} WO\n`;
-            Object.entries(counts).filter(([k]) => k !== 'total').sort((a, b) => b[1] - a[1]).forEach(([s, c]) => {
-              msg += `   • ${s}: ${c}\n`;
-            });
-            msg += '\n';
-          });
+          msg += generateSektorGroupedDetail(filteredData, 'WO', 'teknisi');
         }
 
         return sendTelegram(chatId, msg, { reply_to_message_id: msgId });
@@ -921,19 +966,10 @@ bot.on('message', async (msg) => {
         const periodLabel = customDate ? `Minggu dari: ${customDate}` : 'Minggu ini';
         let msg = `📈 <b>LAPORAN TEKNISI MINGGUAN</b>\n${periodLabel}\nTotal: ${filteredData.length} WO\n\n`;
 
-        if (entries.length === 0) {
+        if (filteredData.length === 0) {
           msg += '<i>Belum ada data untuk periode ini</i>';
         } else {
-          msg += generateSektorBreakdown(filteredData, 'WO');
-
-          entries.forEach(([teknisi, counts], i) => {
-            const medal = i < 3 ? ['🥇', '🥈', '🥉'][i] : `${i + 1}.`;
-            msg += `${medal} <b>${teknisi}</b> - ${counts.total} WO\n`;
-            Object.entries(counts).filter(([k]) => k !== 'total').sort((a, b) => b[1] - a[1]).forEach(([s, c]) => {
-              msg += `   • ${s}: ${c}\n`;
-            });
-            msg += '\n';
-          });
+          msg += generateSektorGroupedDetail(filteredData, 'WO', 'teknisi');
         }
 
         return sendTelegram(chatId, msg, { reply_to_message_id: msgId });
@@ -977,22 +1013,10 @@ bot.on('message', async (msg) => {
         }
         let msg = `📅 <b>LAPORAN TEKNISI BULANAN</b>\nPeriode: ${periodLabel}\nTotal: ${filteredData.length} WO\n\n`;
 
-        if (entries.length === 0) {
+        if (filteredData.length === 0) {
           msg += '<i>Belum ada data untuk periode ini</i>';
         } else {
-          msg += generateSektorBreakdown(filteredData, 'WO');
-
-          entries.slice(0, 15).forEach(([teknisi, counts], i) => {
-            const medal = i < 3 ? ['🥇', '🥈', '🥉'][i] : `${i + 1}.`;
-            msg += `${medal} <b>${teknisi}</b> - ${counts.total} WO\n`;
-            Object.entries(counts).filter(([k]) => k !== 'total').sort((a, b) => b[1] - a[1]).forEach(([s, c]) => {
-              msg += `   • ${s}: ${c}\n`;
-            });
-            msg += '\n';
-          });
-          if (entries.length > 15) {
-            msg += `... dan ${entries.length - 15} teknisi lainnya\n`;
-          }
+          msg += generateSektorGroupedDetail(filteredData, 'WO', 'teknisi');
         }
 
         return sendTelegram(chatId, msg, { reply_to_message_id: msgId });
@@ -1038,7 +1062,7 @@ bot.on('message', async (msg) => {
         const yearLabel = customDate || new Date().getFullYear().toString();
         let msg = `📆 <b>LAPORAN TEKNISI TAHUNAN</b>\nTahun: ${yearLabel}\nTotal: ${filteredData.length} WO\n\n`;
 
-        if (entries.length === 0) {
+        if (filteredData.length === 0) {
           msg += '<i>Belum ada data untuk periode ini</i>';
         } else {
           msg += '<b>📊 BREAKDOWN PER BULAN:</b>\n';
@@ -1048,16 +1072,7 @@ bot.on('message', async (msg) => {
             msg += `${monthNames[m]}: ${count} WO ${bar}\n`;
           }
 
-          msg += generateSektorBreakdown(filteredData, 'WO');
-
-          msg += '\n<b>🏆 TOP 20 TEKNISI:</b>\n';
-          entries.slice(0, 20).forEach(([teknisi, counts], i) => {
-            const medal = i < 3 ? ['🥇', '🥈', '🥉'][i] : `${i + 1}.`;
-            msg += `${medal} <b>${teknisi}</b> - ${counts.total} WO\n`;
-          });
-          if (entries.length > 20) {
-            msg += `\n... dan ${entries.length - 20} teknisi lainnya\n`;
-          }
+          msg += generateSektorGroupedDetail(filteredData, 'WO', 'teknisi');
         }
 
         return sendTelegram(chatId, msg, { reply_to_message_id: msgId });
@@ -1092,25 +1107,10 @@ bot.on('message', async (msg) => {
 
         let msg = '📊 <b>LAPORAN TEKNISI - KESELURUHAN</b>\n\n';
 
-        if (entries.length === 0) {
+        if (data.length <= 1) {
           msg += '<i>Belum ada data</i>';
         } else {
-          msg += generateSektorBreakdown(data.slice(1), 'WO');
-
-          entries.forEach((entry) => {
-            const [teknisi, counts] = entry;
-            msg += `🔸 <b>${teknisi}</b>\n`;
-            msg += `   <b>Total:</b> ${counts.total} WO\n`;
-
-            const symptoms = Object.entries(counts)
-              .filter(([k]) => k !== 'total')
-              .sort((a, b) => b[1] - a[1]);
-
-            symptoms.forEach(([symptomName, count]) => {
-              msg += `   • ${symptomName}: ${count}\n`;
-            });
-            msg += '\n';
-          });
+          msg += generateSektorGroupedDetail(data.slice(1), 'WO', 'teknisi');
         }
 
         return sendTelegram(chatId, msg, { reply_to_message_id: msgId });
@@ -1147,19 +1147,10 @@ bot.on('message', async (msg) => {
         const dateLabel = customDate || 'Hari ini';
         let msg = `📍 <b>REKAP WORKZONE - ${dateLabel}</b>\n\n`;
 
-        if (entries.length === 0) {
+        if (filteredData.length === 0) {
           msg += '<i>Belum ada data untuk periode ini</i>';
         } else {
-          msg += generateSektorBreakdown(filteredData, 'WO');
-
-          entries.forEach(([workzone, counts]) => {
-            msg += `🔸 <b>${workzone}</b>\n`;
-            msg += `   <b>Total:</b> ${counts.total} WO\n`;
-            Object.entries(counts).filter(([k]) => k !== 'total').sort((a, b) => b[1] - a[1]).forEach(([s, c]) => {
-              msg += `   • ${s}: ${c}\n`;
-            });
-            msg += '\n';
-          });
+          msg += generateSektorGroupedDetail(filteredData, 'WO', 'workzone');
         }
 
         return sendTelegram(chatId, msg, { reply_to_message_id: msgId });
@@ -1196,18 +1187,10 @@ bot.on('message', async (msg) => {
         const periodLabel = customDate ? `Minggu dari: ${customDate}` : 'Minggu ini';
         let msg = `📍 <b>REKAP WORKZONE MINGGUAN</b>\n${periodLabel}\nTotal: ${filteredData.length} WO\n\n`;
 
-        if (entries.length === 0) {
+        if (filteredData.length === 0) {
           msg += '<i>Belum ada data untuk periode ini</i>';
         } else {
-          msg += generateSektorBreakdown(filteredData, 'WO');
-
-          entries.forEach(([workzone, counts]) => {
-            msg += `🔸 <b>${workzone}</b> - ${counts.total} WO\n`;
-            Object.entries(counts).filter(([k]) => k !== 'total').sort((a, b) => b[1] - a[1]).forEach(([s, c]) => {
-              msg += `   • ${s}: ${c}\n`;
-            });
-            msg += '\n';
-          });
+          msg += generateSektorGroupedDetail(filteredData, 'WO', 'workzone');
         }
 
         return sendTelegram(chatId, msg, { reply_to_message_id: msgId });
@@ -1244,18 +1227,10 @@ bot.on('message', async (msg) => {
         const periodLabel = customDate ? `Bulan dari: ${customDate}` : 'Bulan ini';
         let msg = `📍 <b>REKAP WORKZONE BULANAN</b>\n${periodLabel}\nTotal: ${filteredData.length} WO\n\n`;
 
-        if (entries.length === 0) {
+        if (filteredData.length === 0) {
           msg += '<i>Belum ada data untuk periode ini</i>';
         } else {
-          msg += generateSektorBreakdown(filteredData, 'WO');
-
-          entries.forEach(([workzone, counts]) => {
-            msg += `🔸 <b>${workzone}</b> - ${counts.total} WO\n`;
-            Object.entries(counts).filter(([k]) => k !== 'total').sort((a, b) => b[1] - a[1]).forEach(([s, c]) => {
-              msg += `   • ${s}: ${c}\n`;
-            });
-            msg += '\n';
-          });
+          msg += generateSektorGroupedDetail(filteredData, 'WO', 'workzone');
         }
 
         return sendTelegram(chatId, msg, { reply_to_message_id: msgId });
@@ -1292,18 +1267,10 @@ bot.on('message', async (msg) => {
         const yearLabel = customDate || new Date().getFullYear().toString();
         let msg = `📍 <b>REKAP WORKZONE TAHUNAN</b>\nTahun: ${yearLabel}\nTotal: ${filteredData.length} WO\n\n`;
 
-        if (entries.length === 0) {
+        if (filteredData.length === 0) {
           msg += '<i>Belum ada data untuk periode ini</i>';
         } else {
-          msg += generateSektorBreakdown(filteredData, 'WO');
-
-          entries.forEach(([workzone, counts]) => {
-            msg += `🔸 <b>${workzone}</b> - ${counts.total} WO\n`;
-            Object.entries(counts).filter(([k]) => k !== 'total').sort((a, b) => b[1] - a[1]).forEach(([s, c]) => {
-              msg += `   • ${s}: ${c}\n`;
-            });
-            msg += '\n';
-          });
+          msg += generateSektorGroupedDetail(filteredData, 'WO', 'workzone');
         }
 
         return sendTelegram(chatId, msg, { reply_to_message_id: msgId });
@@ -1404,25 +1371,10 @@ bot.on('message', async (msg) => {
 
         let msg = '📍 <b>REKAP WORKZONE - KESELURUHAN</b>\n\n';
 
-        if (entries.length === 0) {
+        if (data.length <= 1) {
           msg += '<i>Belum ada data</i>';
         } else {
-          msg += generateSektorBreakdown(data.slice(1), 'WO');
-
-          entries.forEach((entry) => {
-            const [workzone, counts] = entry;
-            msg += `🔸 <b>${workzone}</b>\n`;
-            msg += `   <b>Total:</b> ${counts.total} WO\n`;
-
-            const symptoms = Object.entries(counts)
-              .filter(([k]) => k !== 'total')
-              .sort((a, b) => b[1] - a[1]);
-
-            symptoms.forEach(([symptomName, count]) => {
-              msg += `   • ${symptomName}: ${count}\n`;
-            });
-            msg += '\n';
-          });
+          msg += generateSektorGroupedDetail(data.slice(1), 'WO', 'workzone');
         }
 
         return sendTelegram(chatId, msg, { reply_to_message_id: msgId });
