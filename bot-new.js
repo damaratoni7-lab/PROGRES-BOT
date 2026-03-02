@@ -367,6 +367,46 @@ function getSektorByWorkzone(workzone) {
   return 'LAINNYA';
 }
 
+// === Helper: Parse nama bulan Indonesia ke index ===
+function parseMonthName(name) {
+  const months = {
+    'januari': 0, 'februari': 1, 'maret': 2, 'april': 3,
+    'mei': 4, 'juni': 5, 'juli': 6, 'agustus': 7,
+    'september': 8, 'oktober': 9, 'november': 10, 'desember': 11,
+    'jan': 0, 'feb': 1, 'mar': 2, 'apr': 3,
+    'jun': 5, 'jul': 6, 'ags': 7, 'aug': 7,
+    'sep': 8, 'okt': 9, 'oct': 9, 'nov': 10, 'des': 11, 'dec': 11
+  };
+  return months[(name || '').toLowerCase().trim()];
+}
+
+// === Helper: Generate sektor breakdown dari data rows ===
+function generateSektorBreakdown(dataRows, unit = 'WO') {
+  let result = '';
+  for (const [sektorName, stoList] of Object.entries(SEKTOR_MAP)) {
+    let sektorTotal = 0;
+    const stoCountMap = {};
+    stoList.forEach(sto => { stoCountMap[sto] = 0; });
+
+    dataRows.forEach(row => {
+      const wz = (row[7] || '').toUpperCase().trim();
+      for (const sto of stoList) {
+        if (wz.startsWith(sto) || wz.includes(sto)) {
+          stoCountMap[sto]++;
+          sektorTotal++;
+          break;
+        }
+      }
+    });
+
+    result += `\n📍 <b>SEKTOR ${sektorName}</b> (${sektorTotal} ${unit})\n`;
+    stoList.forEach(sto => {
+      result += `• ${sto}: ${stoCountMap[sto]}\n`;
+    });
+  }
+  return result;
+}
+
 // === HELPER: Parse tanggal Indonesia ke Date ===
 function parseIndonesianDate(dateStr) {
   const months = {
@@ -399,11 +439,18 @@ function filterDataByPeriod(data, period, customDate = null) {
     const datePattern = /(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/;
     const yearMatch = customDate.match(yearOnlyPattern);
     const match = customDate.match(datePattern);
+    const monthIdx = parseMonthName(customDate);
 
     if (yearMatch && period === 'yearly') {
       const year = parseInt(yearMatch[1]);
       startDate = new Date(year, 0, 1);
       endDate = new Date(year, 11, 31);
+      endDate.setHours(23, 59, 59, 999);
+    } else if (monthIdx !== undefined && period === 'monthly') {
+      // Support nama bulan: /monthly januari
+      const year = today.getFullYear();
+      startDate = new Date(year, monthIdx, 1);
+      endDate = new Date(year, monthIdx + 1, 0);
       endDate.setHours(23, 59, 59, 999);
     } else if (match) {
       const day = parseInt(match[1]);
@@ -828,6 +875,8 @@ bot.on('message', async (msg) => {
         if (entries.length === 0) {
           msg += '<i>Belum ada data untuk periode ini</i>';
         } else {
+          msg += generateSektorBreakdown(filteredData, 'WO');
+
           entries.forEach(([teknisi, counts]) => {
             msg += `🔸 <b>${teknisi}</b>\n`;
             msg += `   <b>Total:</b> ${counts.total} WO\n`;
@@ -875,6 +924,8 @@ bot.on('message', async (msg) => {
         if (entries.length === 0) {
           msg += '<i>Belum ada data untuk periode ini</i>';
         } else {
+          msg += generateSektorBreakdown(filteredData, 'WO');
+
           entries.forEach(([teknisi, counts], i) => {
             const medal = i < 3 ? ['🥇', '🥈', '🥉'][i] : `${i + 1}.`;
             msg += `${medal} <b>${teknisi}</b> - ${counts.total} WO\n`;
@@ -916,12 +967,21 @@ bot.on('message', async (msg) => {
         });
 
         const entries = Object.entries(map).sort((a, b) => b[1].total - a[1].total);
-        const periodLabel = customDate ? `Bulan dari: ${customDate}` : 'Bulan ini';
-        let msg = `📅 <b>LAPORAN TEKNISI BULANAN</b>\n${periodLabel}\nTotal: ${filteredData.length} WO\n\n`;
+        const monthNamesCap = ['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'];
+        let periodLabel;
+        if (customDate) {
+          const mIdx = parseMonthName(customDate);
+          periodLabel = mIdx !== undefined ? `${monthNamesCap[mIdx]} ${new Date().getFullYear()}` : `Bulan dari: ${customDate}`;
+        } else {
+          periodLabel = `${monthNamesCap[new Date().getMonth()]} ${new Date().getFullYear()}`;
+        }
+        let msg = `📅 <b>LAPORAN TEKNISI BULANAN</b>\nPeriode: ${periodLabel}\nTotal: ${filteredData.length} WO\n\n`;
 
         if (entries.length === 0) {
           msg += '<i>Belum ada data untuk periode ini</i>';
         } else {
+          msg += generateSektorBreakdown(filteredData, 'WO');
+
           entries.slice(0, 15).forEach(([teknisi, counts], i) => {
             const medal = i < 3 ? ['🥇', '🥈', '🥉'][i] : `${i + 1}.`;
             msg += `${medal} <b>${teknisi}</b> - ${counts.total} WO\n`;
@@ -988,6 +1048,8 @@ bot.on('message', async (msg) => {
             msg += `${monthNames[m]}: ${count} WO ${bar}\n`;
           }
 
+          msg += generateSektorBreakdown(filteredData, 'WO');
+
           msg += '\n<b>🏆 TOP 20 TEKNISI:</b>\n';
           entries.slice(0, 20).forEach(([teknisi, counts], i) => {
             const medal = i < 3 ? ['🥇', '🥈', '🥉'][i] : `${i + 1}.`;
@@ -1033,6 +1095,8 @@ bot.on('message', async (msg) => {
         if (entries.length === 0) {
           msg += '<i>Belum ada data</i>';
         } else {
+          msg += generateSektorBreakdown(data.slice(1), 'WO');
+
           entries.forEach((entry) => {
             const [teknisi, counts] = entry;
             msg += `🔸 <b>${teknisi}</b>\n`;
@@ -1086,6 +1150,8 @@ bot.on('message', async (msg) => {
         if (entries.length === 0) {
           msg += '<i>Belum ada data untuk periode ini</i>';
         } else {
+          msg += generateSektorBreakdown(filteredData, 'WO');
+
           entries.forEach(([workzone, counts]) => {
             msg += `🔸 <b>${workzone}</b>\n`;
             msg += `   <b>Total:</b> ${counts.total} WO\n`;
@@ -1133,6 +1199,8 @@ bot.on('message', async (msg) => {
         if (entries.length === 0) {
           msg += '<i>Belum ada data untuk periode ini</i>';
         } else {
+          msg += generateSektorBreakdown(filteredData, 'WO');
+
           entries.forEach(([workzone, counts]) => {
             msg += `🔸 <b>${workzone}</b> - ${counts.total} WO\n`;
             Object.entries(counts).filter(([k]) => k !== 'total').sort((a, b) => b[1] - a[1]).forEach(([s, c]) => {
@@ -1179,6 +1247,8 @@ bot.on('message', async (msg) => {
         if (entries.length === 0) {
           msg += '<i>Belum ada data untuk periode ini</i>';
         } else {
+          msg += generateSektorBreakdown(filteredData, 'WO');
+
           entries.forEach(([workzone, counts]) => {
             msg += `🔸 <b>${workzone}</b> - ${counts.total} WO\n`;
             Object.entries(counts).filter(([k]) => k !== 'total').sort((a, b) => b[1] - a[1]).forEach(([s, c]) => {
@@ -1225,6 +1295,8 @@ bot.on('message', async (msg) => {
         if (entries.length === 0) {
           msg += '<i>Belum ada data untuk periode ini</i>';
         } else {
+          msg += generateSektorBreakdown(filteredData, 'WO');
+
           entries.forEach(([workzone, counts]) => {
             msg += `🔸 <b>${workzone}</b> - ${counts.total} WO\n`;
             Object.entries(counts).filter(([k]) => k !== 'total').sort((a, b) => b[1] - a[1]).forEach(([s, c]) => {
@@ -1335,6 +1407,8 @@ bot.on('message', async (msg) => {
         if (entries.length === 0) {
           msg += '<i>Belum ada data</i>';
         } else {
+          msg += generateSektorBreakdown(data.slice(1), 'WO');
+
           entries.forEach((entry) => {
             const [workzone, counts] = entry;
             msg += `🔸 <b>${workzone}</b>\n`;
