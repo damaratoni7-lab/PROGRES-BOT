@@ -25,7 +25,7 @@ if (!GOOGLE_SERVICE_ACCOUNT_JSON) {
 let serviceAccount;
 try {
   let keyData = GOOGLE_SERVICE_ACCOUNT_JSON.trim();
-
+  
   // Jika base64, decode dulu
   if (!keyData.startsWith('{')) {
     try {
@@ -34,7 +34,7 @@ try {
       // bukan base64
     }
   }
-
+  
   serviceAccount = JSON.parse(keyData);
   console.log('✅ Google Service Account parsed');
 } catch (e) {
@@ -160,7 +160,7 @@ async function sendTelegram(chatId, text, options = {}) {
 function withTimeout(promise, ms = 10000) {
   return Promise.race([
     promise,
-    new Promise((_, reject) =>
+    new Promise((_, reject) => 
       setTimeout(() => reject(new Error('Timeout - Google API response too slow')), ms)
     )
   ]);
@@ -175,7 +175,7 @@ async function getUserRole(username) {
       const inputUser = (username || '').replace('@', '').toLowerCase().trim();
       const status = (data[i][10] || '').toUpperCase().trim();
       const role = (data[i][9] || '').toUpperCase().trim();
-
+      
       if (sheetUser === inputUser && status === 'AKTIF') {
         return role;
       }
@@ -195,7 +195,7 @@ async function getUserData(username) {
       const sheetUser = (data[i][8] || '').replace('@', '').toLowerCase().trim();
       const inputUser = (username || '').replace('@', '').toLowerCase().trim();
       const status = (data[i][10] || '').toUpperCase().trim();
-
+      
       if (sheetUser === inputUser && status === 'AKTIF') {
         return data[i];
       }
@@ -214,16 +214,82 @@ async function checkAuthorization(username, requiredRoles = []) {
     if (!userRole) {
       return { authorized: false, role: null, message: '❌ Anda tidak terdaftar di sistem.' };
     }
-
+    
     if (requiredRoles.length > 0 && !requiredRoles.includes(userRole)) {
       return { authorized: false, role: userRole, message: `❌ Akses ditolak. Role ${userRole} tidak memiliki izin untuk command ini.` };
     }
-
+    
     return { authorized: true, role: userRole };
   } catch (error) {
     console.error('Authorization error:', error.message);
     return { authorized: false, role: null, message: '❌ Terjadi kesalahan saat verifikasi. Server sedang sibuk.' };
   }
+}
+
+// === HELPER: Get valid symptom values from MASTER sheet (UPDATE LAPANGAN columns A-D) ===
+async function getValidSymptoms() {
+  try {
+    const data = await getSheetData(MASTER_SHEET);
+    const categories = {
+      'KENDALA TEKNIK (NON INSC)': [],
+      'KENDALA TEKNIK (INSC)': [],
+      'KENDALA PELANGGAN': [],
+      'POTENSI PS': [],
+    };
+    const categoryKeys = Object.keys(categories);
+    const allValues = [];
+
+    // Baris ke-3+ (index 2+), kolom A-D (index 0-3) berisi nilai UPDATE LAPANGAN
+    for (let i = 2; i < data.length; i++) {
+      for (let col = 0; col < 4; col++) {
+        const val = (data[i][col] || '').trim().toUpperCase();
+        if (val && !allValues.includes(val)) {
+          allValues.push(val);
+          categories[categoryKeys[col]].push(val);
+        }
+      }
+    }
+
+    return { allValues, categories };
+  } catch (error) {
+    console.error('Error getting valid symptoms:', error.message);
+    return { allValues: [], categories: {} };
+  }
+}
+
+// === HELPER: Validate symptom against master list ===
+async function validateSymptom(symptomValue) {
+  const { allValues, categories } = await withTimeout(getValidSymptoms(), 8000);
+  const normalized = (symptomValue || '').trim().toUpperCase();
+
+  if (!normalized) {
+    return { valid: false, isEmpty: true, categories };
+  }
+
+  if (allValues.includes(normalized)) {
+    return { valid: true, normalized };
+  }
+
+  return { valid: false, isEmpty: false, categories };
+}
+
+// === HELPER: Format symptom error message ===
+function formatSymptomError(categories) {
+  let msg = '❌ SYMPTOM tidak valid!\n\n';
+  msg += '📋 <b>Pilih salah satu dari daftar berikut:</b>\n\n';
+
+  for (const [catName, values] of Object.entries(categories)) {
+    if (values.length > 0) {
+      msg += `<b>▸ ${catName}:</b>\n`;
+      values.forEach(v => {
+        msg += `  • ${v}\n`;
+      });
+      msg += '\n';
+    }
+  }
+
+  msg += '<i>Pastikan SYMPTOM sesuai dengan daftar di atas.</i>';
+  return msg;
 }
 
 // === HELPER: Parse progres data ===
@@ -349,237 +415,6 @@ function parseAktivasi(text, username) {
   return data;
 }
 
-// === SEKTOR CONFIG ===
-const SEKTOR_MAP = {
-  'SIGLI': ['SGI', 'BNN', 'MRU', 'SLG'],
-  'LAMTEMEN': ['LTM', 'LOA'],
-};
-
-function getSektorByWorkzone(workzone) {
-  const wz = (workzone || '').toUpperCase().trim();
-  for (const [sektor, stoList] of Object.entries(SEKTOR_MAP)) {
-    for (const sto of stoList) {
-      if (wz.startsWith(sto) || wz.includes(sto)) {
-        return sektor;
-      }
-    }
-  }
-  return 'LAINNYA';
-}
-
-// === Helper: Parse nama bulan Indonesia ke index ===
-function parseMonthName(name) {
-  const months = {
-    'januari': 0, 'februari': 1, 'maret': 2, 'april': 3,
-    'mei': 4, 'juni': 5, 'juli': 6, 'agustus': 7,
-    'september': 8, 'oktober': 9, 'november': 10, 'desember': 11,
-    'jan': 0, 'feb': 1, 'mar': 2, 'apr': 3,
-    'jun': 5, 'jul': 6, 'ags': 7, 'aug': 7,
-    'sep': 8, 'okt': 9, 'oct': 9, 'nov': 10, 'des': 11, 'dec': 11
-  };
-  return months[(name || '').toLowerCase().trim()];
-}
-
-// === Helper: Generate sektor breakdown dari data rows ===
-function generateSektorBreakdown(dataRows, unit = 'WO') {
-  let result = '';
-  for (const [sektorName, stoList] of Object.entries(SEKTOR_MAP)) {
-    let sektorTotal = 0;
-    const stoCountMap = {};
-    stoList.forEach(sto => { stoCountMap[sto] = 0; });
-
-    dataRows.forEach(row => {
-      const wz = (row[7] || '').toUpperCase().trim();
-      for (const sto of stoList) {
-        if (wz.startsWith(sto) || wz.includes(sto)) {
-          stoCountMap[sto]++;
-          sektorTotal++;
-          break;
-        }
-      }
-    });
-
-    result += `\n📍 <b>SEKTOR ${sektorName}</b> (${sektorTotal} ${unit})\n`;
-    stoList.forEach(sto => {
-      result += `• ${sto}: ${stoCountMap[sto]}\n`;
-    });
-  }
-  return result;
-}
-
-// === Helper: Sektor grouped detail (STO counts + detail entries inside each sektor) ===
-// detailMode: 'workzone' (group by workzone col 7) or 'teknisi' (group by teknisi col 17)
-function generateSektorGroupedDetail(dataRows, unit = 'WO', detailMode = 'workzone') {
-  let result = '';
-  const detailCol = detailMode === 'workzone' ? 7 : 17;
-
-  for (const [sektorName, stoList] of Object.entries(SEKTOR_MAP)) {
-    let sektorTotal = 0;
-    const stoCountMap = {};
-    stoList.forEach(sto => { stoCountMap[sto] = 0; });
-    const sektorRows = [];
-
-    dataRows.forEach(row => {
-      const wz = (row[7] || '').toUpperCase().trim();
-      for (const sto of stoList) {
-        if (wz.startsWith(sto) || wz.includes(sto)) {
-          stoCountMap[sto]++;
-          sektorTotal++;
-          sektorRows.push(row);
-          break;
-        }
-      }
-    });
-
-    result += `\n📍 <b>SEKTOR ${sektorName}</b> (${sektorTotal} ${unit})\n`;
-    stoList.forEach(sto => {
-      result += `• ${sto}: ${stoCountMap[sto]}\n`;
-    });
-
-    if (sektorRows.length === 0) continue;
-
-    // Group detail entries
-    const detailMap = {};
-    sektorRows.forEach(row => {
-      const key = (row[detailCol] || '-').trim();
-      const symptom = (row[10] || '-').trim();
-      if (!detailMap[key]) detailMap[key] = { total: 0 };
-      detailMap[key].total++;
-      detailMap[key][symptom] = (detailMap[key][symptom] || 0) + 1;
-    });
-
-    result += '\n';
-    Object.entries(detailMap).sort((a, b) => b[1].total - a[1].total).forEach(([key, counts]) => {
-      result += `🔸 <b>${key}</b>\n`;
-      result += `   <b>Total:</b> ${counts.total} ${unit}\n`;
-      Object.entries(counts).filter(([k]) => k !== 'total').sort((a, b) => b[1] - a[1]).forEach(([s, c]) => {
-        result += `   • ${s}: ${c}\n`;
-      });
-      result += '\n';
-    });
-  }
-  return result;
-}
-
-// === HELPER: Parse tanggal Indonesia ke Date ===
-function parseIndonesianDate(dateStr) {
-  const months = {
-    'januari': '01', 'februari': '02', 'maret': '03', 'april': '04',
-    'mei': '05', 'juni': '06', 'juli': '07', 'agustus': '08',
-    'september': '09', 'oktober': '10', 'november': '11', 'desember': '12'
-  };
-
-  const parts = dateStr.toLowerCase().split(' ');
-  if (parts.length >= 4) {
-    const day = parts[1].padStart(2, '0');
-    const month = months[parts[2]];
-    const year = parts[3];
-    if (month) {
-      return new Date(`${year}-${month}-${day}`);
-    }
-  }
-  return null;
-}
-
-// === HELPER: Filter data berdasarkan periode ===
-function filterDataByPeriod(data, period, customDate = null) {
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-
-  let startDate, endDate;
-
-  if (customDate) {
-    const yearOnlyPattern = /^(\d{4})$/;
-    const datePattern = /(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/;
-    const yearMatch = customDate.match(yearOnlyPattern);
-    const match = customDate.match(datePattern);
-    const monthIdx = parseMonthName(customDate);
-
-    if (yearMatch && period === 'yearly') {
-      const year = parseInt(yearMatch[1]);
-      startDate = new Date(year, 0, 1);
-      endDate = new Date(year, 11, 31);
-      endDate.setHours(23, 59, 59, 999);
-    } else if (monthIdx !== undefined && period === 'monthly') {
-      // Support nama bulan: /monthly januari
-      const year = today.getFullYear();
-      startDate = new Date(year, monthIdx, 1);
-      endDate = new Date(year, monthIdx + 1, 0);
-      endDate.setHours(23, 59, 59, 999);
-    } else if (match) {
-      const day = parseInt(match[1]);
-      const month = parseInt(match[2]) - 1;
-      const year = parseInt(match[3]);
-      const targetDate = new Date(year, month, day);
-
-      if (period === 'daily') {
-        startDate = new Date(targetDate);
-        endDate = new Date(targetDate);
-        endDate.setHours(23, 59, 59, 999);
-      } else if (period === 'weekly') {
-        const dayOfWeek = targetDate.getDay();
-        const mondayOffset = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
-        startDate = new Date(targetDate);
-        startDate.setDate(targetDate.getDate() + mondayOffset);
-        startDate.setHours(0, 0, 0, 0);
-        endDate = new Date(startDate);
-        endDate.setDate(startDate.getDate() + 6);
-        endDate.setHours(23, 59, 59, 999);
-      } else if (period === 'monthly') {
-        startDate = new Date(targetDate.getFullYear(), targetDate.getMonth(), 1);
-        endDate = new Date(targetDate.getFullYear(), targetDate.getMonth() + 1, 0);
-        endDate.setHours(23, 59, 59, 999);
-      } else if (period === 'yearly') {
-        startDate = new Date(targetDate.getFullYear(), 0, 1);
-        endDate = new Date(targetDate.getFullYear(), 11, 31);
-        endDate.setHours(23, 59, 59, 999);
-      }
-    }
-  } else {
-    switch (period) {
-      case 'daily':
-        startDate = new Date(today);
-        endDate = new Date(today);
-        endDate.setHours(23, 59, 59, 999);
-        break;
-      case 'weekly':
-        const dayOfWeek = today.getDay();
-        const mondayOffset = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
-        startDate = new Date(today);
-        startDate.setDate(today.getDate() + mondayOffset);
-        endDate = new Date(startDate);
-        endDate.setDate(startDate.getDate() + 6);
-        endDate.setHours(23, 59, 59, 999);
-        break;
-      case 'monthly':
-        startDate = new Date(today.getFullYear(), today.getMonth(), 1);
-        endDate = new Date(today.getFullYear(), today.getMonth() + 1, 0);
-        endDate.setHours(23, 59, 59, 999);
-        break;
-      case 'yearly':
-        startDate = new Date(today.getFullYear(), 0, 1);
-        endDate = new Date(today.getFullYear(), 11, 31);
-        endDate.setHours(23, 59, 59, 999);
-        break;
-      default:
-        return data.slice(1);
-    }
-  }
-
-  const filtered = [];
-  for (let i = 1; i < data.length; i++) {
-    const dateStr = data[i][0];
-    if (dateStr) {
-      const rowDate = parseIndonesianDate(dateStr);
-      if (rowDate && rowDate >= startDate && rowDate <= endDate) {
-        filtered.push(data[i]);
-      }
-    }
-  }
-
-  return filtered;
-}
-
 // === BOT SETUP ===
 const PORT = process.env.PORT || 3001;
 const RAILWAY_STATIC_URL = process.env.RAILWAY_STATIC_URL;
@@ -615,7 +450,7 @@ if (USE_WEBHOOK) {
   });
 } else {
   // Polling mode dengan optimized settings untuk multiple groups
-  bot = new TelegramBot(TOKEN, {
+  bot = new TelegramBot(TOKEN, { 
     polling: {
       interval: 300,        // Check every 300ms (faster response)
       autoStart: true,
@@ -626,7 +461,7 @@ if (USE_WEBHOOK) {
     }
   });
   console.log('✅ Bot running in polling mode (optimized for multiple groups)');
-
+  
   // Error handler untuk polling
   bot.on('polling_error', (error) => {
     if (error.code === 'EFATAL') {
@@ -675,12 +510,19 @@ bot.on('message', async (msg) => {
         const user = await withTimeout(getUserData(username), 8000);
         const parsed = parseProgres(inputText, user, username);
 
-        const required = ['channel', 'scOrderNo', 'serviceNo', 'customerName', 'workzone'];
+        const required = ['channel', 'scOrderNo', 'serviceNo', 'customerName', 'workzone', 'symptom'];
         const missing = required.filter(f => !parsed[f]);
 
         if (missing.length > 0) {
           return sendTelegram(chatId, `❌ Field wajib: ${missing.join(', ')}`, { reply_to_message_id: msgId });
         }
+
+        // Validasi SYMPTOM terhadap master UPDATE LAPANGAN
+        const symptomCheck = await validateSymptom(parsed.symptom);
+        if (!symptomCheck.valid) {
+          return sendTelegram(chatId, formatSymptomError(symptomCheck.categories), { reply_to_message_id: msgId });
+        }
+        parsed.symptom = symptomCheck.normalized; // Normalize ke uppercase
 
         const row = [
           parsed.dateCreated,    // A: DATE CREATED
@@ -730,12 +572,19 @@ bot.on('message', async (msg) => {
         const parsed = parseAktivasi(inputText, username);
         console.log('✅ Parsed aktivasi data:', parsed);
 
-        const required = ['channel', 'customerName', 'serviceNo', 'workzone'];
+        const required = ['channel', 'customerName', 'serviceNo', 'workzone', 'symptom'];
         const missing = required.filter(f => !parsed[f]);
 
         if (missing.length > 0) {
           return sendTelegram(chatId, `❌ Field wajib: ${missing.join(', ')}`, { reply_to_message_id: msgId });
         }
+
+        // Validasi SYMPTOM terhadap master UPDATE LAPANGAN
+        const symptomCheck = await validateSymptom(parsed.symptom);
+        if (!symptomCheck.valid) {
+          return sendTelegram(chatId, formatSymptomError(symptomCheck.categories), { reply_to_message_id: msgId });
+        }
+        parsed.symptom = symptomCheck.normalized; // Normalize ke uppercase
 
         // Tentukan package (gunakan preferensi PACKAGE untuk DIGIPOS, PAKET untuk BS/ES/GS)
         const packageInfo = parsed.package || parsed.paket || '-';
@@ -807,10 +656,10 @@ bot.on('message', async (msg) => {
         for (let i = 1; i < data.length; i++) {
           const dateCreated = (data[i][0] || '').trim();  // Column A
           if (dateCreated !== today) continue;
-
+          
           const teknisi = (data[i][17] || '-').trim();  // Column R
           if (teknisi !== args) continue;
-
+          
           const symptom = (data[i][10] || '-').trim();  // Column K
           const ao = (data[i][3] || '-').trim();  // Column D (AO)
 
@@ -824,7 +673,7 @@ bot.on('message', async (msg) => {
         let totalWO = Object.values(map).reduce((sum, arr) => sum + arr.length, 0);
         let msg = `📋 <b>PROGRES HARI INI - ${args}</b>\n\n`;
         msg += `<b>Total: ${totalWO} WO</b>\n`;
-
+        
         if (entries.length === 0) {
           msg += '<i>Belum ada data untuk hari ini</i>';
         } else {
@@ -859,47 +708,47 @@ bot.on('message', async (msg) => {
         }
 
         const data = await withTimeout(getSheetData(PROGRES_SHEET), 10000);
-        let map = {};
+      let map = {};
 
-        for (let i = 1; i < data.length; i++) {
-          const teknisi = (data[i][17] || '-').trim();  // Column R
-          if (teknisi !== args) continue;
+      for (let i = 1; i < data.length; i++) {
+        const teknisi = (data[i][17] || '-').trim();  // Column R
+        if (teknisi !== args) continue;
+        
+        const symptom = (data[i][10] || '-').trim();  // Column K
+        const ao = (data[i][3] || '-').trim();  // Column D (AO)
 
-          const symptom = (data[i][10] || '-').trim();  // Column K
-          const ao = (data[i][3] || '-').trim();  // Column D (AO)
+        if (!map[symptom]) map[symptom] = [];
+        map[symptom].push(ao);
+      }
 
-          if (!map[symptom]) map[symptom] = [];
-          map[symptom].push(ao);
-        }
+      const entries = Object.entries(map)
+        .sort((a, b) => b[1].length - a[1].length);
 
-        const entries = Object.entries(map)
-          .sort((a, b) => b[1].length - a[1].length);
-
-        let totalWO = Object.values(map).reduce((sum, arr) => sum + arr.length, 0);
-        let msg = `📋 <b>SELURUH PROGRES - ${args}</b>\n\n`;
-        msg += `<b>Total: ${totalWO} WO</b>\n`;
-
-        if (entries.length === 0) {
-          msg += '<i>Belum ada data</i>';
-        } else {
-          entries.forEach((entry) => {
-            const [symptom, aos] = entry;
-            msg += `   • <b>${symptom}: ${aos.length}</b>\n`;
-            aos.forEach(ao => {
-              msg += `${ao}\n`;
-            });
-            msg += '\n';
+      let totalWO = Object.values(map).reduce((sum, arr) => sum + arr.length, 0);
+      let msg = `📋 <b>SELURUH PROGRES - ${args}</b>\n\n`;
+      msg += `<b>Total: ${totalWO} WO</b>\n`;
+      
+      if (entries.length === 0) {
+        msg += '<i>Belum ada data</i>';
+      } else {
+        entries.forEach((entry) => {
+          const [symptom, aos] = entry;
+          msg += `   • <b>${symptom}: ${aos.length}</b>\n`;
+          aos.forEach(ao => {
+            msg += `${ao}\n`;
           });
-        }
+          msg += '\n';
+        });
+      }
 
-        return sendTelegram(chatId, msg, { reply_to_message_id: msgId });
+      return sendTelegram(chatId, msg, { reply_to_message_id: msgId });
       } catch (err) {
         console.error('❌ /all Error:', err.message);
         return sendTelegram(chatId, `❌ Error: ${err.message}. Server sedang sibuk.`, { reply_to_message_id: msgId });
       }
     }
 
-    // === /progres [dd/mm/yyyy] ===
+    // === /progres ===
     else if (/^\/progres\b/i.test(text)) {
       try {
         const auth = await checkAuthorization(username, ['ADMIN']);
@@ -907,177 +756,56 @@ bot.on('message', async (msg) => {
           return sendTelegram(chatId, auth.message, { reply_to_message_id: msgId });
         }
 
-        const args = text.replace(/^\/progres\s*/i, '').trim();
-        const customDate = args || null;
-
-        const data = await withTimeout(getSheetData(PROGRES_SHEET), 10000);
-        const filteredData = filterDataByPeriod(data, 'daily', customDate);
-
-        let map = {};
-        filteredData.forEach(row => {
-          const teknisi = (row[17] || '-').trim();
-          const symptom = (row[10] || '-').trim();
-          if (!map[teknisi]) map[teknisi] = { total: 0 };
-          map[teknisi].total++;
-          map[teknisi][symptom] = (map[teknisi][symptom] || 0) + 1;
+        const today = new Date().toLocaleDateString('id-ID', {
+          weekday: 'long',
+          day: 'numeric',
+          month: 'long',
+          year: 'numeric',
+          timeZone: 'Asia/Jakarta',
         });
 
-        const entries = Object.entries(map).sort((a, b) => b[1].total - a[1].total);
-        const dateLabel = customDate || 'Hari ini';
-        let msg = `📊 <b>LAPORAN TEKNISI - ${dateLabel}</b>\n\n`;
+        const data = await withTimeout(getSheetData(PROGRES_SHEET), 10000);
+      let map = {};
 
-        if (filteredData.length === 0) {
-          msg += '<i>Belum ada data untuk periode ini</i>';
-        } else {
-          msg += generateSektorGroupedDetail(filteredData, 'WO', 'teknisi');
-        }
+      for (let i = 1; i < data.length; i++) {
+        const dateCreated = (data[i][0] || '').trim();  // Column A (index 0)
+        if (dateCreated !== today) continue;  // Filter hanya hari ini
+        
+        const teknisi = (data[i][17] || '-').trim();  // Column R (index 17)
+        const symptom = (data[i][10] || '-').trim();  // Column K (index 10)
 
-        return sendTelegram(chatId, msg, { reply_to_message_id: msgId });
+        if (!map[teknisi]) map[teknisi] = { total: 0 };
+        map[teknisi].total++;
+        map[teknisi][symptom] = (map[teknisi][symptom] || 0) + 1;
+      }
+
+      const entries = Object.entries(map)
+        .sort((a, b) => b[1].total - a[1].total);
+
+      let msg = `📊 <b>LAPORAN TEKNISI - HARI INI</b>\n<b>${today}</b>\n\n`;
+      
+      if (entries.length === 0) {
+        msg += '<i>Belum ada data untuk hari ini</i>';
+      } else {
+        entries.forEach((entry) => {
+          const [teknisi, counts] = entry;
+          msg += `🔸 <b>${teknisi}</b>\n`;
+          msg += `   <b>Total:</b> ${counts.total} WO\n`;
+          
+          const symptoms = Object.entries(counts)
+            .filter(([k]) => k !== 'total')
+            .sort((a, b) => b[1] - a[1]);
+          
+          symptoms.forEach(([symptomName, count]) => {
+            msg += `   • ${symptomName}: ${count}\n`;
+          });
+          msg += '\n';
+        });
+      }
+
+      return sendTelegram(chatId, msg, { reply_to_message_id: msgId });
       } catch (err) {
         console.error('❌ /progres Error:', err.message);
-        return sendTelegram(chatId, `❌ Error: ${err.message}. Server sedang sibuk.`, { reply_to_message_id: msgId });
-      }
-    }
-
-    // === /weekly [dd/mm/yyyy] - Laporan mingguan per teknisi ===
-    else if (/^\/weekly\b/i.test(text)) {
-      try {
-        const auth = await checkAuthorization(username, ['ADMIN']);
-        if (!auth.authorized) {
-          return sendTelegram(chatId, auth.message, { reply_to_message_id: msgId });
-        }
-
-        const args = text.replace(/^\/weekly\s*/i, '').trim();
-        const customDate = args || null;
-
-        const data = await withTimeout(getSheetData(PROGRES_SHEET), 10000);
-        const filteredData = filterDataByPeriod(data, 'weekly', customDate);
-
-        let map = {};
-        filteredData.forEach(row => {
-          const teknisi = (row[17] || '-').trim();
-          const symptom = (row[10] || '-').trim();
-          if (!map[teknisi]) map[teknisi] = { total: 0 };
-          map[teknisi].total++;
-          map[teknisi][symptom] = (map[teknisi][symptom] || 0) + 1;
-        });
-
-        const entries = Object.entries(map).sort((a, b) => b[1].total - a[1].total);
-        const periodLabel = customDate ? `Minggu dari: ${customDate}` : 'Minggu ini';
-        let msg = `📈 <b>LAPORAN TEKNISI MINGGUAN</b>\n${periodLabel}\nTotal: ${filteredData.length} WO\n\n`;
-
-        if (filteredData.length === 0) {
-          msg += '<i>Belum ada data untuk periode ini</i>';
-        } else {
-          msg += generateSektorGroupedDetail(filteredData, 'WO', 'teknisi');
-        }
-
-        return sendTelegram(chatId, msg, { reply_to_message_id: msgId });
-      } catch (err) {
-        console.error('❌ /weekly Error:', err.message);
-        return sendTelegram(chatId, `❌ Error: ${err.message}. Server sedang sibuk.`, { reply_to_message_id: msgId });
-      }
-    }
-
-    // === /monthly [dd/mm/yyyy] - Laporan bulanan per teknisi ===
-    else if (/^\/monthly\b/i.test(text)) {
-      try {
-        const auth = await checkAuthorization(username, ['ADMIN']);
-        if (!auth.authorized) {
-          return sendTelegram(chatId, auth.message, { reply_to_message_id: msgId });
-        }
-
-        const args = text.replace(/^\/monthly\s*/i, '').trim();
-        const customDate = args || null;
-
-        const data = await withTimeout(getSheetData(PROGRES_SHEET), 10000);
-        const filteredData = filterDataByPeriod(data, 'monthly', customDate);
-
-        let map = {};
-        filteredData.forEach(row => {
-          const teknisi = (row[17] || '-').trim();
-          const symptom = (row[10] || '-').trim();
-          if (!map[teknisi]) map[teknisi] = { total: 0 };
-          map[teknisi].total++;
-          map[teknisi][symptom] = (map[teknisi][symptom] || 0) + 1;
-        });
-
-        const entries = Object.entries(map).sort((a, b) => b[1].total - a[1].total);
-        const monthNamesCap = ['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'];
-        let periodLabel;
-        if (customDate) {
-          const mIdx = parseMonthName(customDate);
-          periodLabel = mIdx !== undefined ? `${monthNamesCap[mIdx]} ${new Date().getFullYear()}` : `Bulan dari: ${customDate}`;
-        } else {
-          periodLabel = `${monthNamesCap[new Date().getMonth()]} ${new Date().getFullYear()}`;
-        }
-        let msg = `📅 <b>LAPORAN TEKNISI BULANAN</b>\nPeriode: ${periodLabel}\nTotal: ${filteredData.length} WO\n\n`;
-
-        if (filteredData.length === 0) {
-          msg += '<i>Belum ada data untuk periode ini</i>';
-        } else {
-          msg += generateSektorGroupedDetail(filteredData, 'WO', 'teknisi');
-        }
-
-        return sendTelegram(chatId, msg, { reply_to_message_id: msgId });
-      } catch (err) {
-        console.error('❌ /monthly Error:', err.message);
-        return sendTelegram(chatId, `❌ Error: ${err.message}. Server sedang sibuk.`, { reply_to_message_id: msgId });
-      }
-    }
-
-    // === /yearly [yyyy] - Laporan tahunan per teknisi ===
-    else if (/^\/yearly\b/i.test(text)) {
-      try {
-        const auth = await checkAuthorization(username, ['ADMIN']);
-        if (!auth.authorized) {
-          return sendTelegram(chatId, auth.message, { reply_to_message_id: msgId });
-        }
-
-        const args = text.replace(/^\/yearly\s*/i, '').trim();
-        const customDate = args || null;
-
-        const data = await withTimeout(getSheetData(PROGRES_SHEET), 10000);
-        const filteredData = filterDataByPeriod(data, 'yearly', customDate);
-
-        let map = {};
-        const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Ags', 'Sep', 'Okt', 'Nov', 'Des'];
-        let monthlyBreakdown = {};
-
-        filteredData.forEach(row => {
-          const teknisi = (row[17] || '-').trim();
-          const symptom = (row[10] || '-').trim();
-          if (!map[teknisi]) map[teknisi] = { total: 0 };
-          map[teknisi].total++;
-          map[teknisi][symptom] = (map[teknisi][symptom] || 0) + 1;
-
-          const rowDate = parseIndonesianDate(row[0] || '');
-          if (rowDate) {
-            const monthIdx = rowDate.getMonth();
-            monthlyBreakdown[monthIdx] = (monthlyBreakdown[monthIdx] || 0) + 1;
-          }
-        });
-
-        const entries = Object.entries(map).sort((a, b) => b[1].total - a[1].total);
-        const yearLabel = customDate || new Date().getFullYear().toString();
-        let msg = `📆 <b>LAPORAN TEKNISI TAHUNAN</b>\nTahun: ${yearLabel}\nTotal: ${filteredData.length} WO\n\n`;
-
-        if (filteredData.length === 0) {
-          msg += '<i>Belum ada data untuk periode ini</i>';
-        } else {
-          msg += '<b>📊 BREAKDOWN PER BULAN:</b>\n';
-          for (let m = 0; m < 12; m++) {
-            const count = monthlyBreakdown[m] || 0;
-            const bar = '█'.repeat(Math.min(Math.ceil(count / 5), 20));
-            msg += `${monthNames[m]}: ${count} WO ${bar}\n`;
-          }
-
-          msg += generateSektorGroupedDetail(filteredData, 'WO', 'teknisi');
-        }
-
-        return sendTelegram(chatId, msg, { reply_to_message_id: msgId });
-      } catch (err) {
-        console.error('❌ /yearly Error:', err.message);
         return sendTelegram(chatId, `❌ Error: ${err.message}. Server sedang sibuk.`, { reply_to_message_id: msgId });
       }
     }
@@ -1091,36 +819,49 @@ bot.on('message', async (msg) => {
         }
 
         const data = await withTimeout(getSheetData(PROGRES_SHEET), 10000);
-        let map = {};
+      let map = {};
 
-        for (let i = 1; i < data.length; i++) {
-          const teknisi = (data[i][17] || '-').trim();  // Column R (index 17)
-          const symptom = (data[i][10] || '-').trim();  // Column K (index 10)
+      for (let i = 1; i < data.length; i++) {
+        const teknisi = (data[i][17] || '-').trim();  // Column R (index 17)
+        const symptom = (data[i][10] || '-').trim();  // Column K (index 10)
 
-          if (!map[teknisi]) map[teknisi] = { total: 0 };
-          map[teknisi].total++;
-          map[teknisi][symptom] = (map[teknisi][symptom] || 0) + 1;
-        }
+        if (!map[teknisi]) map[teknisi] = { total: 0 };
+        map[teknisi].total++;
+        map[teknisi][symptom] = (map[teknisi][symptom] || 0) + 1;
+      }
 
-        const entries = Object.entries(map)
-          .sort((a, b) => b[1].total - a[1].total);
+      const entries = Object.entries(map)
+        .sort((a, b) => b[1].total - a[1].total);
 
-        let msg = '📊 <b>LAPORAN TEKNISI - KESELURUHAN</b>\n\n';
+      let msg = '📊 <b>LAPORAN TEKNISI - KESELURUHAN</b>\n\n';
+      
+      if (entries.length === 0) {
+        msg += '<i>Belum ada data</i>';
+      } else {
+        entries.forEach((entry) => {
+          const [teknisi, counts] = entry;
+          msg += `🔸 <b>${teknisi}</b>\n`;
+          msg += `   <b>Total:</b> ${counts.total} WO\n`;
+          
+          const symptoms = Object.entries(counts)
+            .filter(([k]) => k !== 'total')
+            .sort((a, b) => b[1] - a[1]);
+          
+          symptoms.forEach(([symptomName, count]) => {
+            msg += `   • ${symptomName}: ${count}\n`;
+          });
+          msg += '\n';
+        });
+      }
 
-        if (data.length <= 1) {
-          msg += '<i>Belum ada data</i>';
-        } else {
-          msg += generateSektorGroupedDetail(data.slice(1), 'WO', 'teknisi');
-        }
-
-        return sendTelegram(chatId, msg, { reply_to_message_id: msgId });
+      return sendTelegram(chatId, msg, { reply_to_message_id: msgId });
       } catch (err) {
         console.error('❌ /allprogres Error:', err.message);
         return sendTelegram(chatId, `❌ Error: ${err.message}. Server sedang sibuk.`, { reply_to_message_id: msgId });
       }
     }
 
-    // === /cek [dd/mm/yyyy] ===
+    // === /cek ===
     else if (/^\/cek\b/i.test(text)) {
       try {
         const auth = await checkAuthorization(username, ['ADMIN']);
@@ -1128,220 +869,56 @@ bot.on('message', async (msg) => {
           return sendTelegram(chatId, auth.message, { reply_to_message_id: msgId });
         }
 
-        const args = text.replace(/^\/cek\s*/i, '').trim();
-        const customDate = args || null;
-
-        const data = await withTimeout(getSheetData(PROGRES_SHEET), 10000);
-        const filteredData = filterDataByPeriod(data, 'daily', customDate);
-
-        let map = {};
-        filteredData.forEach(row => {
-          const workzone = (row[7] || '-').trim();
-          const symptom = (row[10] || '-').trim();
-          if (!map[workzone]) map[workzone] = { total: 0 };
-          map[workzone].total++;
-          map[workzone][symptom] = (map[workzone][symptom] || 0) + 1;
+        const today = new Date().toLocaleDateString('id-ID', {
+          weekday: 'long',
+          day: 'numeric',
+          month: 'long',
+          year: 'numeric',
+          timeZone: 'Asia/Jakarta',
         });
 
-        const entries = Object.entries(map).sort((a, b) => b[1].total - a[1].total);
-        const dateLabel = customDate || 'Hari ini';
-        let msg = `📍 <b>REKAP WORKZONE - ${dateLabel}</b>\n\n`;
+        const data = await withTimeout(getSheetData(PROGRES_SHEET), 10000);
+      let map = {};
 
-        if (filteredData.length === 0) {
-          msg += '<i>Belum ada data untuk periode ini</i>';
-        } else {
-          msg += generateSektorGroupedDetail(filteredData, 'WO', 'workzone');
-        }
+      for (let i = 1; i < data.length; i++) {
+        const dateCreated = (data[i][0] || '').trim();  // Column A (index 0)
+        if (dateCreated !== today) continue;  // Filter hanya hari ini
+        
+        const workzone = (data[i][7] || '-').trim();   // Column H (index 7)
+        const symptom = (data[i][10] || '-').trim();   // Column K (index 10)
 
-        return sendTelegram(chatId, msg, { reply_to_message_id: msgId });
+        if (!map[workzone]) map[workzone] = { total: 0 };
+        map[workzone].total++;
+        map[workzone][symptom] = (map[workzone][symptom] || 0) + 1;
+      }
+
+      const entries = Object.entries(map)
+        .sort((a, b) => b[1].total - a[1].total);
+
+      let msg = `📍 <b>REKAP WORKZONE - HARI INI</b>\n<b>${today}</b>\n\n`;
+      
+      if (entries.length === 0) {
+        msg += '<i>Belum ada data untuk hari ini</i>';
+      } else {
+        entries.forEach((entry) => {
+          const [workzone, counts] = entry;
+          msg += `🔸 <b>${workzone}</b>\n`;
+          msg += `   <b>Total:</b> ${counts.total} WO\n`;
+          
+          const symptoms = Object.entries(counts)
+            .filter(([k]) => k !== 'total')
+            .sort((a, b) => b[1] - a[1]);
+          
+          symptoms.forEach(([symptomName, count]) => {
+            msg += `   • ${symptomName}: ${count}\n`;
+          });
+          msg += '\n';
+        });
+      }
+
+      return sendTelegram(chatId, msg, { reply_to_message_id: msgId });
       } catch (err) {
         console.error('❌ /cek Error:', err.message);
-        return sendTelegram(chatId, `❌ Error: ${err.message}. Server sedang sibuk.`, { reply_to_message_id: msgId });
-      }
-    }
-
-    // === /weekcek [dd/mm/yyyy] - Rekap workzone mingguan ===
-    else if (/^\/weekcek\b/i.test(text)) {
-      try {
-        const auth = await checkAuthorization(username, ['ADMIN']);
-        if (!auth.authorized) {
-          return sendTelegram(chatId, auth.message, { reply_to_message_id: msgId });
-        }
-
-        const args = text.replace(/^\/weekcek\s*/i, '').trim();
-        const customDate = args || null;
-
-        const data = await withTimeout(getSheetData(PROGRES_SHEET), 10000);
-        const filteredData = filterDataByPeriod(data, 'weekly', customDate);
-
-        let map = {};
-        filteredData.forEach(row => {
-          const workzone = (row[7] || '-').trim();
-          const symptom = (row[10] || '-').trim();
-          if (!map[workzone]) map[workzone] = { total: 0 };
-          map[workzone].total++;
-          map[workzone][symptom] = (map[workzone][symptom] || 0) + 1;
-        });
-
-        const entries = Object.entries(map).sort((a, b) => b[1].total - a[1].total);
-        const periodLabel = customDate ? `Minggu dari: ${customDate}` : 'Minggu ini';
-        let msg = `📍 <b>REKAP WORKZONE MINGGUAN</b>\n${periodLabel}\nTotal: ${filteredData.length} WO\n\n`;
-
-        if (filteredData.length === 0) {
-          msg += '<i>Belum ada data untuk periode ini</i>';
-        } else {
-          msg += generateSektorGroupedDetail(filteredData, 'WO', 'workzone');
-        }
-
-        return sendTelegram(chatId, msg, { reply_to_message_id: msgId });
-      } catch (err) {
-        console.error('❌ /weekcek Error:', err.message);
-        return sendTelegram(chatId, `❌ Error: ${err.message}. Server sedang sibuk.`, { reply_to_message_id: msgId });
-      }
-    }
-
-    // === /monthcek [dd/mm/yyyy] - Rekap workzone bulanan ===
-    else if (/^\/monthcek\b/i.test(text)) {
-      try {
-        const auth = await checkAuthorization(username, ['ADMIN']);
-        if (!auth.authorized) {
-          return sendTelegram(chatId, auth.message, { reply_to_message_id: msgId });
-        }
-
-        const args = text.replace(/^\/monthcek\s*/i, '').trim();
-        const customDate = args || null;
-
-        const data = await withTimeout(getSheetData(PROGRES_SHEET), 10000);
-        const filteredData = filterDataByPeriod(data, 'monthly', customDate);
-
-        let map = {};
-        filteredData.forEach(row => {
-          const workzone = (row[7] || '-').trim();
-          const symptom = (row[10] || '-').trim();
-          if (!map[workzone]) map[workzone] = { total: 0 };
-          map[workzone].total++;
-          map[workzone][symptom] = (map[workzone][symptom] || 0) + 1;
-        });
-
-        const entries = Object.entries(map).sort((a, b) => b[1].total - a[1].total);
-        const periodLabel = customDate ? `Bulan dari: ${customDate}` : 'Bulan ini';
-        let msg = `📍 <b>REKAP WORKZONE BULANAN</b>\n${periodLabel}\nTotal: ${filteredData.length} WO\n\n`;
-
-        if (filteredData.length === 0) {
-          msg += '<i>Belum ada data untuk periode ini</i>';
-        } else {
-          msg += generateSektorGroupedDetail(filteredData, 'WO', 'workzone');
-        }
-
-        return sendTelegram(chatId, msg, { reply_to_message_id: msgId });
-      } catch (err) {
-        console.error('❌ /monthcek Error:', err.message);
-        return sendTelegram(chatId, `❌ Error: ${err.message}. Server sedang sibuk.`, { reply_to_message_id: msgId });
-      }
-    }
-
-    // === /yearcek [yyyy] - Rekap workzone tahunan ===
-    else if (/^\/yearcek\b/i.test(text)) {
-      try {
-        const auth = await checkAuthorization(username, ['ADMIN']);
-        if (!auth.authorized) {
-          return sendTelegram(chatId, auth.message, { reply_to_message_id: msgId });
-        }
-
-        const args = text.replace(/^\/yearcek\s*/i, '').trim();
-        const customDate = args || null;
-
-        const data = await withTimeout(getSheetData(PROGRES_SHEET), 10000);
-        const filteredData = filterDataByPeriod(data, 'yearly', customDate);
-
-        let map = {};
-        filteredData.forEach(row => {
-          const workzone = (row[7] || '-').trim();
-          const symptom = (row[10] || '-').trim();
-          if (!map[workzone]) map[workzone] = { total: 0 };
-          map[workzone].total++;
-          map[workzone][symptom] = (map[workzone][symptom] || 0) + 1;
-        });
-
-        const entries = Object.entries(map).sort((a, b) => b[1].total - a[1].total);
-        const yearLabel = customDate || new Date().getFullYear().toString();
-        let msg = `📍 <b>REKAP WORKZONE TAHUNAN</b>\nTahun: ${yearLabel}\nTotal: ${filteredData.length} WO\n\n`;
-
-        if (filteredData.length === 0) {
-          msg += '<i>Belum ada data untuk periode ini</i>';
-        } else {
-          msg += generateSektorGroupedDetail(filteredData, 'WO', 'workzone');
-        }
-
-        return sendTelegram(chatId, msg, { reply_to_message_id: msgId });
-      } catch (err) {
-        console.error('❌ /yearcek Error:', err.message);
-        return sendTelegram(chatId, `❌ Error: ${err.message}. Server sedang sibuk.`, { reply_to_message_id: msgId });
-      }
-    }
-
-    // === /sektor [nama_sektor] [periode] [tanggal] - Laporan per Sektor ===
-    else if (/^\/sektor\b/i.test(text)) {
-      try {
-        const auth = await checkAuthorization(username, ['ADMIN']);
-        if (!auth.authorized) {
-          return sendTelegram(chatId, auth.message, { reply_to_message_id: msgId });
-        }
-
-        const args = text.replace(/^\/sektor\s*/i, '').trim().split(/\s+/);
-        const sektorName = (args[0] || '').toUpperCase();
-        const period = (args[1] || 'daily').toLowerCase();
-        const customDate = args[2] || null;
-
-        if (!sektorName || !SEKTOR_MAP[sektorName]) {
-          const availableSektors = Object.entries(SEKTOR_MAP).map(([name, stos]) => `• <b>${name}</b>: ${stos.join(', ')}`).join('\n');
-          return sendTelegram(chatId, `📍 <b>DAFTAR SEKTOR:</b>\n${availableSektors}\n\n<b>Format:</b> /sektor [NAMA] [periode] [tanggal]\nPeriode: daily, weekly, monthly, yearly\nContoh: /sektor SIGLI monthly`, { reply_to_message_id: msgId });
-        }
-
-        const stoList = SEKTOR_MAP[sektorName];
-        const data = await withTimeout(getSheetData(PROGRES_SHEET), 10000);
-        const filteredData = filterDataByPeriod(data, period, customDate);
-
-        // Filter by sektor
-        const sektorData = filteredData.filter(row => {
-          const wz = (row[7] || '').toUpperCase().trim();
-          return stoList.some(sto => wz.startsWith(sto) || wz.includes(sto));
-        });
-
-        let teknisiMap = {}, workzoneMap = {};
-        sektorData.forEach(row => {
-          const teknisi = (row[17] || '-').trim();
-          const workzone = (row[7] || '-').trim();
-          teknisiMap[teknisi] = (teknisiMap[teknisi] || 0) + 1;
-          workzoneMap[workzone] = (workzoneMap[workzone] || 0) + 1;
-        });
-
-        const periodLabels = {
-          daily: customDate || 'Hari ini',
-          weekly: customDate ? `Minggu dari: ${customDate}` : 'Minggu ini',
-          monthly: customDate ? `Bulan dari: ${customDate}` : 'Bulan ini',
-          yearly: customDate || 'Tahun ini'
-        };
-
-        let msg = `📍 <b>LAPORAN SEKTOR ${sektorName}</b>\nSTO: ${stoList.join(', ')}\nPeriode: ${periodLabels[period] || 'Hari ini'}\nTotal: ${sektorData.length} WO\n\n`;
-
-        if (sektorData.length === 0) {
-          msg += '<i>Belum ada data untuk sektor dan periode ini</i>';
-        } else {
-          msg += '<b>Per Workzone:</b>\n';
-          Object.entries(workzoneMap).sort((a, b) => b[1] - a[1]).forEach(([w, c]) => {
-            msg += `• ${w}: ${c} WO\n`;
-          });
-
-          msg += '\n<b>Per Teknisi:</b>\n';
-          Object.entries(teknisiMap).sort((a, b) => b[1] - a[1]).forEach(([t, c], i) => {
-            msg += `${i + 1}. ${t}: ${c} WO\n`;
-          });
-        }
-
-        return sendTelegram(chatId, msg, { reply_to_message_id: msgId });
-      } catch (err) {
-        console.error('❌ /sektor Error:', err.message);
         return sendTelegram(chatId, `❌ Error: ${err.message}. Server sedang sibuk.`, { reply_to_message_id: msgId });
       }
     }
@@ -1355,32 +932,74 @@ bot.on('message', async (msg) => {
         }
 
         const data = await withTimeout(getSheetData(PROGRES_SHEET), 10000);
-        let map = {};
+      let map = {};
 
-        for (let i = 1; i < data.length; i++) {
-          const workzone = (data[i][7] || '-').trim();   // Column H (index 7)
-          const symptom = (data[i][10] || '-').trim();   // Column K (index 10)
+      for (let i = 1; i < data.length; i++) {
+        const workzone = (data[i][7] || '-').trim();   // Column H (index 7)
+        const symptom = (data[i][10] || '-').trim();   // Column K (index 10)
 
-          if (!map[workzone]) map[workzone] = { total: 0 };
-          map[workzone].total++;
-          map[workzone][symptom] = (map[workzone][symptom] || 0) + 1;
-        }
+        if (!map[workzone]) map[workzone] = { total: 0 };
+        map[workzone].total++;
+        map[workzone][symptom] = (map[workzone][symptom] || 0) + 1;
+      }
 
-        const entries = Object.entries(map)
-          .sort((a, b) => b[1].total - a[1].total);
+      const entries = Object.entries(map)
+        .sort((a, b) => b[1].total - a[1].total);
 
-        let msg = '📍 <b>REKAP WORKZONE - KESELURUHAN</b>\n\n';
+      let msg = '📍 <b>REKAP WORKZONE - KESELURUHAN</b>\n\n';
+      
+      if (entries.length === 0) {
+        msg += '<i>Belum ada data</i>';
+      } else {
+        entries.forEach((entry) => {
+          const [workzone, counts] = entry;
+          msg += `🔸 <b>${workzone}</b>\n`;
+          msg += `   <b>Total:</b> ${counts.total} WO\n`;
+          
+          const symptoms = Object.entries(counts)
+            .filter(([k]) => k !== 'total')
+            .sort((a, b) => b[1] - a[1]);
+          
+          symptoms.forEach(([symptomName, count]) => {
+            msg += `   • ${symptomName}: ${count}\n`;
+          });
+          msg += '\n';
+        });
+      }
 
-        if (data.length <= 1) {
-          msg += '<i>Belum ada data</i>';
-        } else {
-          msg += generateSektorGroupedDetail(data.slice(1), 'WO', 'workzone');
-        }
-
-        return sendTelegram(chatId, msg, { reply_to_message_id: msgId });
+      return sendTelegram(chatId, msg, { reply_to_message_id: msgId });
       } catch (err) {
         console.error('❌ /allcek Error:', err.message);
         return sendTelegram(chatId, `❌ Error: ${err.message}. Server sedang sibuk.`, { reply_to_message_id: msgId });
+      }
+    }
+
+    // === /listsymptom ===
+    else if (/^\/listsymptom\b/i.test(text)) {
+      try {
+        const auth = await checkAuthorization(username, ['USER', 'ADMIN']);
+        if (!auth.authorized) {
+          return sendTelegram(chatId, auth.message, { reply_to_message_id: msgId });
+        }
+
+        const { categories } = await withTimeout(getValidSymptoms(), 8000);
+        let msg = '📋 <b>DAFTAR SYMPTOM YANG VALID</b>\n\n';
+
+        for (const [catName, values] of Object.entries(categories)) {
+          if (values.length > 0) {
+            msg += `<b>▸ ${catName}:</b>\n`;
+            values.forEach(v => {
+              msg += `  • ${v}\n`;
+            });
+            msg += '\n';
+          }
+        }
+
+        msg += '<i>Gunakan salah satu nilai di atas untuk field SYMPTOM.</i>';
+        return sendTelegram(chatId, msg, { reply_to_message_id: msgId });
+      } catch (err) {
+        console.error('❌ /listsymptom Error:', err.message);
+        return sendTelegram(chatId, `❌ Error: ${err.message}`, { reply_to_message_id: msgId });
       }
     }
 
@@ -1392,34 +1011,30 @@ bot.on('message', async (msg) => {
           return sendTelegram(chatId, auth.message, { reply_to_message_id: msgId });
         }
 
-        const sektorList = Object.entries(SEKTOR_MAP).map(([name, stos]) => `  ${name}: ${stos.join(', ')}`).join('\n');
-        const helpMsg = `🤖 <b>Bot Progres PSB</b>\n\n` +
-          `<b>📝 INPUT DATA:</b>\n` +
-          `• /UPDATE [data] - Input progres\n` +
-          `• /AKTIVASI [data] - Input aktivasi\n\n` +
-          `<b>👤 PER TEKNISI:</b>\n` +
-          `• /today [ID] - Progres hari ini\n` +
-          `• /all [ID] - Seluruh progres\n\n` +
-          `<b>📊 LAPORAN TEKNISI:</b>\n` +
-          `• /progres [dd/mm/yyyy] - Harian\n` +
-          `• /weekly [dd/mm/yyyy] - Mingguan\n` +
-          `• /monthly [dd/mm/yyyy] - Bulanan\n` +
-          `• /yearly [yyyy] - Tahunan\n` +
-          `• /allprogres - Keseluruhan\n\n` +
-          `<b>📍 REKAP WORKZONE:</b>\n` +
-          `• /cek [dd/mm/yyyy] - Harian\n` +
-          `• /weekcek [dd/mm/yyyy] - Mingguan\n` +
-          `• /monthcek [dd/mm/yyyy] - Bulanan\n` +
-          `• /yearcek [yyyy] - Tahunan\n` +
-          `• /allcek - Keseluruhan\n\n` +
-          `<b>📍 SEKTOR:</b>\n` +
-          `• /sektor [NAMA] [periode] [tgl]\n` +
-          `  Periode: daily, weekly, monthly, yearly\n` +
-          `  Sektor tersedia:\n${sektorList}\n\n` +
-          `<b>Contoh:</b>\n` +
-          `/today FH_ABDULLAH_16891190\n` +
-          `/weekly 01/03/2026\n` +
-          `/sektor SIGLI monthly`;
+        const helpMsg = `🤖 Bot Progres PSB
+
+Commands:
+/UPDATE - Input progres (di group)
+/AKTIVASI - Input data aktivasi (di group)
+/today TEKNISI_ID - Progres hari ini (teknisi)
+/all TEKNISI_ID - Seluruh progres (teknisi)
+/progres - Laporan teknisi HARI INI
+/allprogres - Laporan teknisi KESELURUHAN
+/cek - Rekap workzone HARI INI
+/allcek - Rekap workzone KESELURUHAN
+/listsymptom - Daftar SYMPTOM yang valid
+/help - Bantuan
+
+⚠️ SYMPTOM harus sesuai daftar MASTER (kolom UPDATE LAPANGAN)
+Gunakan /listsymptom untuk melihat daftar yang valid.
+
+Contoh:
+/today FH_ABDULLAH_16891190
+/all FH_ABDULLAH_16891190
+/progres
+/allprogres
+/cek
+/allcek`;
 
         return sendTelegram(chatId, helpMsg, { reply_to_message_id: msgId });
       } catch (err) {
